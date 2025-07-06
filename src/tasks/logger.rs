@@ -1,8 +1,8 @@
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
-use std::fs::OpenOptions;
-use std::io::Write;
 
 use crate::kernel::task::{Task, TaskId, TaskPriority, TaskType};
 use crate::tasks::sensor::HeartbeatData;
@@ -46,15 +46,15 @@ impl LoggerTask {
     pub async fn execute(&mut self) {
         // Ler dados do sensor
         let data = self.sensor_data.lock().await;
-        
+
         // Formatar a entrada de log
         let log_entry = format!(
-            "{},{},{}\n",
+            "{},{:.3}mV,{}\n",
             data.timestamp.format("%Y-%m-%d %H:%M:%S%.3f"),
-            data.bpm,
+            data.mv,
             if data.is_anomaly { "ANOMALY" } else { "NORMAL" }
         );
-        
+
         // Escrever no arquivo de log
         match OpenOptions::new()
             .create(true)
@@ -70,9 +70,11 @@ impl LoggerTask {
                 log::error!("Erro ao abrir arquivo de log: {}", e);
             }
         }
-        
-        log::info!("Log registrado: BPM={} às {}", 
-                   data.bpm, 
-                   data.timestamp.format("%H:%M:%S"));
+
+        log::info!(
+            "Log registrado: {:.3}mV às {}",
+            data.mv,
+            data.timestamp.format("%H:%M:%S")
+        );
     }
 }

@@ -17,9 +17,7 @@ pub enum TaskPriority {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TaskType {
     /// Tarefa periódica com período fixo
-    Periodic {
-        period: Duration,
-    },
+    Periodic { period: Duration },
     /// Tarefa aperiódica acionada por eventos
     Aperiodic,
 }
