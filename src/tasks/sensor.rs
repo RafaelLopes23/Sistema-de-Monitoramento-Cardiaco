@@ -13,6 +13,9 @@ use rand::random;
 use chrono::Local;
 use std::time::Duration as StdDuration;
 use tokio::sync::mpsc::UnboundedSender;
+use std::pin::Pin;
+use std::future::Future;
+use crate::kernel::task::Executable;
 
 /// Estrutura de dados compartilhada do sensor
 #[derive(Debug, Clone)]
@@ -38,7 +41,7 @@ impl HeartbeatSensorTask {
     /// Cria uma nova tarefa de sensor
     pub fn new(id: TaskId, shared_data: Arc<Mutex<HeartbeatData>>, csv_path: &str) -> Self {
         let file = File::open(csv_path).expect("falha ao abrir CSV de ECG");
-        let mut rdr = Reader::from_reader(file);
+        let rdr = Reader::from_reader(file);
         let iter = rdr.into_records();
         Self { id, shared_data, csv_iter: iter, log_sender: None }
     }
@@ -170,5 +173,13 @@ impl HeartbeatSensorTask {
             }
         }
         log::info!("CSV de ECG finalizado");
+    }
+}
+
+impl Executable for HeartbeatSensorTask {
+    fn execute<'a>(&'a mut self) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
+        Box::pin(async move {
+            self.execute().await;
+        })
     }
 }

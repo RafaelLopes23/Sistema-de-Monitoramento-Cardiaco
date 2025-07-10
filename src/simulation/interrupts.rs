@@ -43,9 +43,8 @@ impl InterruptSimulator {
         // Iniciar thread para simular interrupções aleatórias
         tokio::spawn(async move {
             loop {
-                // Esperar intervalo antes da próxima verificação
-                tokio::time::sleep(interval).await;
-                
+                // Log de verificação de interrupções
+                log::info!("[{}] Verificando interrupções...", Local::now().format("%H:%M:%S"));
                 // Verificar se deve gerar uma interrupção
                 if rand::random::<f64>() < prob {
                     // Gerar um tipo aleatório de interrupção
@@ -57,7 +56,7 @@ impl InterruptSimulator {
                     };
 
                     // Log de interrupção simulada com timestamp
-                    log::warn!("[{}] 🚨 Interrupção simulada: {}", Local::now().format("%H:%M:%S"), interrupt_type);
+                    log::info!("[{}] Interrupção simulada: {}", Local::now().format("%H:%M:%S"), interrupt_type);
 
                     // Enviar interrupção para o escalonador
                     if tx
@@ -68,6 +67,9 @@ impl InterruptSimulator {
                         break; // Canal fechado, sair do loop
                     }
                 }
+
+                // Esperar intervalo antes da próxima verificação
+                tokio::time::sleep(interval).await;
             }
         });
     }

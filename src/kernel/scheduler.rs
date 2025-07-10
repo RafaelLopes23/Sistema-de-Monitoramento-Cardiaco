@@ -5,8 +5,10 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc::{self, Receiver, Sender};
 use tokio::time;
 
-use super::task::{Task, TaskId, TaskPriority, TaskType};
+use super::task::{Task, TaskId, TaskPriority, TaskType, Executable};
 use crate::utils::timing::Timestamp;
+use std::pin::Pin;
+use std::future::Future;
 
 /// Mensagens que podem ser enviadas para o scheduler
 #[derive(Debug)]
@@ -136,7 +138,9 @@ impl Scheduler {
         let mut tasks: HashMap<TaskId, Task> = HashMap::new();
 
         // Tarefa em execução
-        let mut current_task: Option<Task> = None;
+        // JoinHandle da tarefa em execução (para preempção)
+        let mut current_handle: Option<tokio::task::JoinHandle<()>> = None;
+        let mut current_task_id: Option<TaskId> = None;
 
         // Contador para gerar IDs de tarefas
         let mut next_id: TaskId = 1000;
@@ -163,18 +167,6 @@ impl Scheduler {
                             }
 
                             tasks.insert(task_id, task);
-
-                            // Verificar preempção
-                            if let Some(ref current) = current_task {
-                                if task_priority > current.priority {
-                                    // Preempção: interromper tarefa atual se a nova tiver maior prioridade
-                                    if let Some(interrupted) = current_task.take() {
-                                        log::info!("Preempção: {} interrompida", interrupted.name);
-                                        // Recolocar a tarefa interrompida na fila
-                                        ready_queue.push((interrupted.priority, Reverse(interrupted.created_at), interrupted.id));
-                                    }
-                                }
-                            }
                         },
                         SchedulerMessage::TaskCompleted(task_id) => {
                             if let Some(mut task) = tasks.remove(&task_id) {
@@ -206,7 +198,7 @@ impl Scheduler {
                                         next_id += 1;
 
                                         // Agendar próxima execução
-                                        let sched_tx = tx.clone();  // <<< CORREÇÃO: Usar o canal do scheduler
+                                        let _sched_tx = tx.clone();  // <<< CORREÇÃO: Usar o canal do scheduler
                                         let template_clone = template.clone();
                                         tokio::spawn(async move {
                                             time::sleep(period).await;
@@ -235,22 +227,22 @@ impl Scheduler {
                                 }
 
                                 // Limpar referência à tarefa atual
-                                if current_task.as_ref().map(|t| t.id) == Some(task_id) {
-                                    current_task = None;
+                                if current_task_id.as_ref() == Some(&task_id) {
+                                    current_task_id = None;
                                 }
                             }
                         },
                         SchedulerMessage::Interrupt(description) => {
                             log::warn!("Interrupção recebida: {}", description);
 
-                            // Criar uma tarefa aperiódica de alta prioridade para lidar com a interrupção
-                            let interrupt_task = Task::new(
+                            // Criar uma tarefa aperiódica de alta prioridade com lógica de tratamento
+                            let interrupt_task = Task::new_aperiodic(
                                 next_id,
                                 format!("Interrupção: {}", description),
-                                TaskType::Aperiodic,
                                 TaskPriority::Critical,
                                 Duration::from_millis(50),  // Deadline curto para interrupções
                                 Duration::from_millis(20),  // WCET estimado
+                                Box::new(InterruptHandler::new(description.clone())),
                             );
 
                             next_id += 1;
@@ -261,10 +253,10 @@ impl Scheduler {
                             ready_queue.push((TaskPriority::Critical, Reverse(Instant::now()), task_id));
 
                             // Preempção forçada para interrupção
-                            if current_task.is_some() {
-                                if let Some(interrupted) = current_task.take() {
-                                    log::info!("Preempção por interrupção: {} interrompida", interrupted.name);
-                                    ready_queue.push((interrupted.priority, Reverse(interrupted.created_at), interrupted.id));
+                            if current_handle.is_some() {
+                                if let Some(interrupted) = current_handle.take() {
+                                    interrupted.abort();
+                                    log::info!("Preempção por interrupção: tarefa abortada");
                                 }
                             }
                         },
@@ -275,33 +267,69 @@ impl Scheduler {
                     }
                 }
 
-                // Se não há tarefa em execução, pegar a próxima da fila
-                _ = time::sleep(Duration::from_millis(10)), if current_task.is_none() => {
+                // Se não há tarefa em execução, pegar a próxima da fila e executá-la de fato
+                _ = time::sleep(Duration::from_millis(10)), if current_handle.is_none() => {
                     if let Some((_, _, task_id)) = ready_queue.pop() {
                         if let Some(mut task) = tasks.remove(&task_id) {
-                            // Começar execução
                             log::info!("Iniciando execução: {}", task.name);
                             task.start();
 
-                            // Simular execução da tarefa
-                            let task_id = task.id;
-                            let wcet = task.wcet;
+                            // Abortar tarefa anterior em caso de preempção
+                            if let Some(handle) = current_handle.take() {
+                                handle.abort();
+                                log::info!("Tarefa {} abortada por preempção", current_task_id.unwrap());
+                            }
+                            current_task_id = Some(task_id);
 
-                            current_task = Some(task);
-
-                            // Spawn de uma tarefa para simular a execução
+                            // Preparar execução real da tarefa
+                            let mut exec = task.executable;
+                            let task_name = task.name.clone();
+                            let deadline = task.deadline;
                             let sched_tx = tx.clone();
-                            tokio::spawn(async move {
-                                // Simular tempo de execução
-                                time::sleep(wcet).await;
-
-                                // Notificar conclusão da tarefa
+                            let results_tx = results_tx.clone();
+                            let started = Instant::now();
+                            // Spawn de execução real
+                            let handle = tokio::spawn(async move {
+                                // Executar a lógica real
+                                exec.execute().await;
+                                let ended = Instant::now();
+                                let execution_time = ended - started;
+                                let deadline_met = execution_time <= deadline;
+                                // Enviar resultado da execução
+                                results_tx.send(TaskResult {
+                                    id: task_id,
+                                    name: task_name,
+                                    started_at: Timestamp::from(started),
+                                    completed_at: Timestamp::from(ended),
+                                    deadline_met,
+                                    execution_time,
+                                }).await.ok();
+                                // Notificar conclusão ao scheduler
                                 sched_tx.send(SchedulerMessage::TaskCompleted(task_id)).await.ok();
                             });
+                            current_handle = Some(handle);
                         }
                     }
                 }
             }
         }
+    }
+}
+
+/// Handler de interrupção para encapsular a lógica de tratamento
+struct InterruptHandler {
+    description: String,
+}
+impl InterruptHandler {
+    fn new(description: String) -> Self {
+        InterruptHandler { description }
+    }
+}
+impl Executable for InterruptHandler {
+    fn execute<'a>(&'a mut self) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
+        Box::pin(async move {
+            log::info!("Tratando interrupção: {}", self.description);
+            time::sleep(Duration::from_millis(20)).await;
+        })
     }
 }

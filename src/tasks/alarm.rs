@@ -1,9 +1,12 @@
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::Mutex;
 
 use crate::kernel::task::{Task, TaskId, TaskPriority, TaskType};
+use crate::kernel::task::Executable;
 use crate::tasks::sensor::HeartbeatData;
 
 /// Tarefa de alarme de emergência
@@ -63,5 +66,13 @@ impl EmergencyAlarmTask {
             // Simular tempo de processamento do alarme
             tokio::time::sleep(Duration::from_millis(15)).await;
         }
+    }
+}
+
+impl Executable for EmergencyAlarmTask {
+    fn execute<'a>(&'a mut self) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
+        Box::pin(async move {
+            self.execute().await;
+        })
     }
 }

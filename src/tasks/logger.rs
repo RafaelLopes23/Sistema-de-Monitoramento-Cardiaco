@@ -1,10 +1,13 @@
 use std::fs::OpenOptions;
 use std::io::Write;
+use std::pin::Pin;
+use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
 
 use crate::kernel::task::{Task, TaskId, TaskPriority, TaskType};
+use crate::kernel::task::Executable;
 use crate::tasks::sensor::HeartbeatData;
 
 /// Tarefa de registro de logs
@@ -76,5 +79,13 @@ impl LoggerTask {
             data.mv,
             data.timestamp.format("%H:%M:%S")
         );
+    }
+}
+
+impl Executable for LoggerTask {
+    fn execute<'a>(&'a mut self) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
+        Box::pin(async move {
+            self.execute().await;
+        })
     }
 }
